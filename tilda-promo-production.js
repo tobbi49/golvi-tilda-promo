@@ -1,4 +1,4 @@
-// === Tilda Promo Integration v1.0.1 ===
+// === Tilda Promo Integration v1.0.3 ===
 const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbwFzq2_UU_omXvNHIxZA6m892mBWNQhWua2VDd-TV8aKxfrjL58p_F792GvMxqB0u-W5Q/exec';
 const MESSAGES = {
   applied: 'Promo code applied — 1 item free',
@@ -21,7 +21,8 @@ const MESSAGES = {
     originalCartData: null,
     intervalId: null,
     mutationObserver: null,
-    boundElements: new Set()
+    boundElements: new Set(),
+    promoContainer: null
   };
 
   /**
@@ -53,11 +54,13 @@ const MESSAGES = {
    * Find promo input and related elements
    */
   function findPromoElements() {
-    // Primary selector: input with name="promocode"
-    TildaPromo.promoInput = document.querySelector('input[name="promocode"]');
+    // Primary selector: input with name="promocode_user"
+    const newPromoInput = document.querySelector('input[name="promocode_user"]');
     
-    // Fallback: search for inputs with promo-related placeholders
-    if (!TildaPromo.promoInput) {
+    if (newPromoInput) {
+      TildaPromo.promoInput = newPromoInput;
+    } else {
+      // Fallback: search for inputs with promo-related placeholders
       const inputs = document.querySelectorAll('input[type="text"], input[type="search"]');
       for (const input of inputs) {
         const placeholder = (input.placeholder || '').toLowerCase();
@@ -73,6 +76,13 @@ const MESSAGES = {
       return false;
     }
 
+    // Rename visible input to prevent Tilda native behavior
+    TildaPromo.promoInput.setAttribute('name', 'promocode_user');
+    
+    // Find promo container
+    TildaPromo.promoContainer = TildaPromo.promoInput.closest('form') || 
+      TildaPromo.promoInput.closest('.t-form__inputsbox, .t-input-group, .t706__cartwin');
+    
     // Find or create apply button
     TildaPromo.applyButton = findOrCreateApplyButton();
     
@@ -82,8 +92,14 @@ const MESSAGES = {
     // Create message element
     createMessageElement();
     
+    // Inject CSS for hiding hints
+    injectHideHintCSS();
+    
     // Hide Tilda hints
     hideTildaHints();
+    
+    // Setup document-level capture listeners
+    setupDocumentCapture();
     
     // Setup mutation observer for dynamic content
     setupMutationObserver();
@@ -168,9 +184,6 @@ const MESSAGES = {
    * Setup event listeners
    */
   function setupEventListeners() {
-    // Block native Tilda promo behavior
-    blockNativeTildaPromo();
-    
     // Input change - clear discount if code changed
     TildaPromo.promoInput.addEventListener('input', function() {
       const currentValue = this.value;
@@ -178,6 +191,16 @@ const MESSAGES = {
         clearPromoDiscount();
       }
     });
+    
+    // Block Enter key on promo input
+    TildaPromo.promoInput.addEventListener('keypress', function(e) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        handleApplyClick();
+      }
+    }, true);
 
     // Listen for cart changes
     if (window.tcart) {
@@ -359,9 +382,6 @@ const MESSAGES = {
 
       // Recalculate cart total (this will subtract one unit's price)
       recalculateCartTotal();
-      
-      // Trigger cart redraw
-      redrawCart();
     }
   }
 
@@ -386,7 +406,6 @@ const MESSAGES = {
     }
 
     recalculateCartTotal();
-    redrawCart();
     hideMessage();
   }
 
@@ -416,6 +435,10 @@ const MESSAGES = {
 
     window.tcart.total = total;
     window.tcart.totalprice = total;
+    window.tcart.promocode = TildaPromo.currentPromoCode || '';
+    window.tcart.promocode_discount = promoDiscount || 0;
+    
+    forceRedraw();
   }
 
   /**
@@ -491,6 +514,21 @@ const MESSAGES = {
     });
     
     // Update cart discount wording
+    updateCartDiscountWording();
+  }
+  
+  /**
+   * Force cart redraw
+   */
+  function forceRedraw() {
+    if (typeof window.tcart__reDrawCart === 'function') {
+      window.tcart__reDrawCart();
+      setTimeout(() => {
+        if (typeof window.tcart__reDrawCart === 'function') {
+          window.tcart__reDrawCart();
+        }
+      }, 50);
+    }
     updateCartDiscountWording();
   }
 
@@ -635,6 +673,18 @@ const MESSAGES = {
   });
 
   /**
+   * Inject CSS for hiding hints
+   */
+  function injectHideHintCSS() {
+    if (document.getElementById('tilda-promo-hide-css')) return;
+    
+    const style = document.createElement('style');
+    style.id = 'tilda-promo-hide-css';
+    style.textContent = '.tilda-hide-dash-hint{display:none!important}';
+    document.head.appendChild(style);
+  }
+  
+  /**
    * Hide Tilda hints about dash symbol
    */
   function hideTildaHints() {
@@ -650,7 +700,7 @@ const MESSAGES = {
     selectors.forEach(selector => {
       document.querySelectorAll(selector).forEach(el => {
         if (el.textContent && el.textContent.includes('Вводить без символа')) {
-          el.style.display = 'none';
+          el.classList.add('tilda-hide-dash-hint');
         }
       });
     });
@@ -670,7 +720,7 @@ const MESSAGES = {
         while (node = walker.nextNode()) {
           if (node.textContent && node.textContent.includes('Вводить без символа')) {
             if (node.parentElement) {
-              node.parentElement.style.display = 'none';
+              node.parentElement.classList.add('tilda-hide-dash-hint');
             }
           }
         }
@@ -703,7 +753,7 @@ const MESSAGES = {
               if (node.querySelector && (
                 node.querySelector('button') || 
                 node.querySelector('input[type="submit"]') ||
-                node.querySelector('input[name="promocode"]')
+                node.querySelector('input[name="promocode_user"]')
               )) {
                 shouldRebind = true;
               }
@@ -717,7 +767,7 @@ const MESSAGES = {
       }
       
       if (shouldRebind) {
-        setTimeout(blockNativeTildaPromo, 100);
+        setTimeout(setupDocumentCapture, 100);
       }
       
       // Always update cart wording when DOM changes
@@ -731,70 +781,46 @@ const MESSAGES = {
   }
 
   /**
-   * Block native Tilda promo behavior
+   * Setup document-level capture listeners
    */
-  function blockNativeTildaPromo() {
-    // Find all potential apply buttons
-    const buttons = document.querySelectorAll('button, input[type="button"], input[type="submit"]');
-    
-    buttons.forEach(button => {
-      // Skip if already bound
-      if (TildaPromo.boundElements.has(button)) {
+  function setupDocumentCapture() {
+    // Document-level click capture
+    document.addEventListener('click', function(e) {
+      if (!TildaPromo.promoContainer || !TildaPromo.promoContainer.contains(e.target)) {
         return;
       }
       
-      // Check if button is related to promo input
-      const isPromoButton = (
-        button === TildaPromo.applyButton ||
-        button.closest('.t-form') === TildaPromo.promoInput?.closest('.t-form') ||
-        button.textContent.toLowerCase().includes('apply') ||
-        button.textContent.toLowerCase().includes('применить')
+      // Check if target is a promo apply control
+      const isPromoControl = (
+        e.target === TildaPromo.applyButton ||
+        e.target.tagName === 'BUTTON' ||
+        (e.target.tagName === 'INPUT' && e.target.type === 'submit') ||
+        e.target.textContent?.toLowerCase().includes('apply') ||
+        e.target.textContent?.toLowerCase().includes('применить')
       );
       
-      if (isPromoButton) {
-        // Add capture-phase listener to block native behavior
-        button.addEventListener('click', function(e) {
-          e.preventDefault();
-          e.stopPropagation();
-          e.stopImmediatePropagation();
-          handleApplyClick();
-        }, true);
-        
-        TildaPromo.boundElements.add(button);
+      if (isPromoControl) {
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        handleApplyClick();
       }
-    });
+    }, true);
     
-    // Also block form submission if it contains promo input
-    if (TildaPromo.promoInput) {
-      const form = TildaPromo.promoInput.closest('form');
-      if (form && !TildaPromo.boundElements.has(form)) {
-        form.addEventListener('submit', function(e) {
-          // Only prevent if promo input has focus or was recently used
-          if (document.activeElement === TildaPromo.promoInput || TildaPromo.promoInput.value) {
-            e.preventDefault();
-            e.stopPropagation();
-            e.stopImmediatePropagation();
-            handleApplyClick();
-          }
-        }, true);
-        
-        TildaPromo.boundElements.add(form);
+    // Document-level submit capture
+    document.addEventListener('submit', function(e) {
+      if (!TildaPromo.promoContainer || !TildaPromo.promoContainer.contains(e.target)) {
+        return;
       }
-    }
-    
-    // Block Enter key on promo input
-    if (TildaPromo.promoInput && !TildaPromo.boundElements.has(TildaPromo.promoInput)) {
-      TildaPromo.promoInput.addEventListener('keypress', function(e) {
-        if (e.key === 'Enter') {
-          e.preventDefault();
-          e.stopPropagation();
-          e.stopImmediatePropagation();
-          handleApplyClick();
-        }
-      }, true);
       
-      TildaPromo.boundElements.add(TildaPromo.promoInput);
-    }
+      // Block form submission if promo input has value
+      if (TildaPromo.promoInput && TildaPromo.promoInput.value) {
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        handleApplyClick();
+      }
+    }, true);
   }
 
   /**
@@ -802,7 +828,11 @@ const MESSAGES = {
    */
   function updateCartDiscountWording() {
     // Only update if promo is applied
-    if (!TildaPromo.currentPromoCode) return;
+    if (!TildaPromo.currentPromoCode) {
+      // Remove disclaimer if no promo
+      document.querySelectorAll('.tilda-promo-disclaimer').forEach(el => el.remove());
+      return;
+    }
     
     // Find discount text elements
     const discountSelectors = [
@@ -817,9 +847,14 @@ const MESSAGES = {
     discountSelectors.forEach(selector => {
       document.querySelectorAll(selector).forEach(el => {
         const text = el.textContent;
-        if (text && (text.includes('Ваша скидка: 100%') || text.includes('скидка: 100%'))) {
+        if (text && /Ваша\s+скидка:\s*100%/i.test(text)) {
           if (!text.includes('на один товар')) {
-            el.textContent = text.replace('100%', '100% на один товар');
+            el.textContent = text.replace(/100%/i, 'на один товар: 100%');
+            updated = true;
+          }
+        } else if (text && /Скидка:\s*100%/i.test(text)) {
+          if (!text.includes('на один товар')) {
+            el.textContent = text.replace(/Скидка:\s*100%/i, 'Ваша скидка на один товар: 100%');
             updated = true;
           }
         }
@@ -839,7 +874,7 @@ const MESSAGES = {
         // Add our disclaimer
         const disclaimer = document.createElement('div');
         disclaimer.className = 'tilda-promo-disclaimer';
-        disclaimer.textContent = 'Ваша скидка: 100% на один товар';
+        disclaimer.textContent = 'Ваша скидка на один товар: 100%';
         disclaimer.style.cssText = `
           font-size: 12px;
           color: #666;
@@ -852,17 +887,25 @@ const MESSAGES = {
     }
   }
 
+  // Add debug helpers
+  window.TildaPromoDebug = {
+    getCurrentPromo: () => TildaPromo.currentPromoCode,
+    getCartState: () => window.tcart,
+    clearPromo: () => clearPromoDiscount(),
+    forceRedraw: () => forceRedraw(),
+    reapplyHints: () => hideTildaHints(),
+    version: 'v1.0.3'
+  };
+
   // Cleanup on page unload
-  window.addEventListener('beforeunload', () => {
+  window.addEventListener('beforeunload', function() {
     if (TildaPromo.intervalId) {
       clearInterval(TildaPromo.intervalId);
-      TildaPromo.intervalId = null;
     }
-    
     if (TildaPromo.mutationObserver) {
       TildaPromo.mutationObserver.disconnect();
-      TildaPromo.mutationObserver = null;
     }
+    TildaPromo.mutationObserver = null;
   });
 
 })();
