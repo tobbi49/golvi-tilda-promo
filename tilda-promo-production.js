@@ -1,11 +1,11 @@
-// === CONFIG ===
+// === Tilda Promo Integration v1.0.1 ===
 const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbwFzq2_UU_omXvNHIxZA6m892mBWNQhWua2VDd-TV8aKxfrjL58p_F792GvMxqB0u-W5Q/exec';
 const MESSAGES = {
   applied: 'Promo code applied — 1 item free',
   invalid: 'Promo code is invalid or already used',
   error: 'Couldn\'t verify promo. Please try again.'
 };
-// ==============
+// ==========================================
 
 (function() {
   'use strict';
@@ -19,7 +19,9 @@ const MESSAGES = {
     promoInput: null,
     hiddenInput: null,
     originalCartData: null,
-    intervalId: null
+    intervalId: null,
+    mutationObserver: null,
+    boundElements: new Set()
   };
 
   /**
@@ -79,6 +81,12 @@ const MESSAGES = {
     
     // Create message element
     createMessageElement();
+    
+    // Hide Tilda hints
+    hideTildaHints();
+    
+    // Setup mutation observer for dynamic content
+    setupMutationObserver();
 
     return true;
   }
@@ -147,6 +155,8 @@ const MESSAGES = {
       font-size: 13px;
       display: none;
       transition: all 0.3s ease;
+      z-index: 9999 !important;
+      position: relative;
     `;
     
     // Insert after the input or button
@@ -158,26 +168,12 @@ const MESSAGES = {
    * Setup event listeners
    */
   function setupEventListeners() {
-    // Apply button click - prevent native Tilda behavior
-    TildaPromo.applyButton.addEventListener('click', function(e) {
-      e.preventDefault();
-      e.stopPropagation();
-      e.stopImmediatePropagation();
-      handleApplyClick();
-    }, true);
+    // Block native Tilda promo behavior
+    blockNativeTildaPromo();
     
-    // Enter key on input
-    TildaPromo.promoInput.addEventListener('keypress', function(e) {
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        e.stopPropagation();
-        handleApplyClick();
-      }
-    });
-
     // Input change - clear discount if code changed
     TildaPromo.promoInput.addEventListener('input', function() {
-      const currentValue = this.value.trim();
+      const currentValue = this.value;
       if (TildaPromo.currentPromoCode && currentValue !== TildaPromo.currentPromoCode) {
         clearPromoDiscount();
       }
@@ -201,15 +197,15 @@ const MESSAGES = {
   async function handleApplyClick() {
     if (TildaPromo.isProcessing) return;
 
-    const code = TildaPromo.promoInput.value.trim();
+    const rawCode = TildaPromo.promoInput.value;
     
-    if (!code) {
+    if (!rawCode.trim()) {
       showMessage(MESSAGES.invalid, 'error');
       return;
     }
 
     // One-promo guard: avoid redundant re-applications
-    if (TildaPromo.currentPromoCode === code) {
+    if (TildaPromo.currentPromoCode === rawCode) {
       return;
     }
 
@@ -217,17 +213,17 @@ const MESSAGES = {
     showMessage('Verifying...', 'info');
 
     try {
-      const result = await verifyPromoCode(code);
+      const result = await verifyPromoCode(rawCode);
       
       if (result.ok && result.valid) {
         // Apply discount - store exact code as typed
-        TildaPromo.currentPromoCode = code;
+        TildaPromo.currentPromoCode = rawCode;
         applyPromoDiscount();
         showMessage(MESSAGES.applied, 'success');
         
-        // Update hidden input with exact code (no case changes)
+        // Update hidden input with exact raw code
         if (TildaPromo.hiddenInput) {
-          TildaPromo.hiddenInput.value = code;
+          TildaPromo.hiddenInput.value = rawCode;
         }
         
       } else {
@@ -248,53 +244,11 @@ const MESSAGES = {
    * Verify promo code with server
    */
   async function verifyPromoCode(code) {
-    // Detect if running in local development
-    const isLocalDev = window.location.hostname === '127.0.0.1' || window.location.hostname === 'localhost';
-    
-    if (isLocalDev) {
-      console.log('[TildaPromo] Proxy mode active');
-      return await verifyViaProxy(code);
-    } else {
-      return await verifyDirect(code);
-    }
+    return await verifyDirect(code);
   }
 
   /**
-   * Verify via local proxy (for development)
-   */
-  async function verifyViaProxy(code) {
-    // Feature-detect AbortSignal.timeout (Safari fallback)
-    let controller, signal;
-    if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
-      signal = AbortSignal.timeout(10000);
-    } else if (typeof AbortController !== 'undefined') {
-      controller = new AbortController();
-      signal = controller.signal;
-      setTimeout(() => { try { controller.abort(); } catch (_) {} }, 10000);
-    }
-
-    const proxyUrl = `http://127.0.0.1:8080/proxy?code=${encodeURIComponent(code)}`;
-
-    try {
-      const response = await fetch(proxyUrl, {
-        method: 'GET',
-        ...(signal ? { signal } : {})
-      });
-
-      if (!response.ok) {
-        throw new Error(`Proxy HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      const jsonResult = await response.json();
-      return jsonResult;
-    } catch (error) {
-      console.error('[TildaPromo] Proxy fetch error:', error);
-      throw error;
-    }
-  }
-
-  /**
-   * Verify directly with Apps Script (for production)
+   * Verify directly with Apps Script
    */
   async function verifyDirect(code) {
     // Feature-detect AbortSignal.timeout (Safari fallback)
@@ -313,15 +267,15 @@ const MESSAGES = {
         headers: {
           'Content-Type': 'text/plain;charset=utf-8'
         },
-        body: JSON.stringify({ action: 'verify', code }),
+        body: JSON.stringify({ action: 'verify', code: code, codeRaw: code }),
         redirect: 'manual', // Critical: Don't follow 302 redirects automatically
         ...(signal ? { signal } : {})
       });
 
       // Handle CORS error (status 0)
       if (response.status === 0) {
-        console.error('[TildaPromo] CORS blocked – use local proxy instead');
-        throw new Error('CORS blocked – use local proxy instead');
+        console.error('[TildaPromo] CORS blocked');
+        throw new Error('CORS blocked');
       }
 
       // Handle Apps Script 302 redirect manually
@@ -535,6 +489,9 @@ const MESSAGES = {
         }
       }
     });
+    
+    // Update cart discount wording
+    updateCartDiscountWording();
   }
 
   /**
@@ -677,11 +634,234 @@ const MESSAGES = {
     setTimeout(tryInit, 500);
   });
 
+  /**
+   * Hide Tilda hints about dash symbol
+   */
+  function hideTildaHints() {
+    const selectors = [
+      '.t-input-title',
+      '.t-input-block__title',
+      '.t-form__inputlabel',
+      '.t-form__title',
+      '.t-descr',
+      '.t-text'
+    ];
+    
+    selectors.forEach(selector => {
+      document.querySelectorAll(selector).forEach(el => {
+        if (el.textContent && el.textContent.includes('Вводить без символа')) {
+          el.style.display = 'none';
+        }
+      });
+    });
+    
+    // Also check for text nodes near the promo input
+    if (TildaPromo.promoInput) {
+      const parent = TildaPromo.promoInput.closest('.t-form__inputsbox, .t-input-group, .t-form');
+      if (parent) {
+        const walker = document.createTreeWalker(
+          parent,
+          NodeFilter.SHOW_TEXT,
+          null,
+          false
+        );
+        
+        let node;
+        while (node = walker.nextNode()) {
+          if (node.textContent && node.textContent.includes('Вводить без символа')) {
+            if (node.parentElement) {
+              node.parentElement.style.display = 'none';
+            }
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Setup mutation observer for dynamic content
+   */
+  function setupMutationObserver() {
+    if (TildaPromo.mutationObserver) {
+      TildaPromo.mutationObserver.disconnect();
+    }
+    
+    TildaPromo.mutationObserver = new MutationObserver((mutations) => {
+      let shouldRehide = false;
+      let shouldRebind = false;
+      
+      mutations.forEach((mutation) => {
+        if (mutation.type === 'childList') {
+          mutation.addedNodes.forEach((node) => {
+            if (node.nodeType === Node.ELEMENT_NODE) {
+              // Check if new elements contain hint text
+              if (node.textContent && node.textContent.includes('Вводить без символа')) {
+                shouldRehide = true;
+              }
+              
+              // Check if new elements contain promo-related buttons
+              if (node.querySelector && (
+                node.querySelector('button') || 
+                node.querySelector('input[type="submit"]') ||
+                node.querySelector('input[name="promocode"]')
+              )) {
+                shouldRebind = true;
+              }
+            }
+          });
+        }
+      });
+      
+      if (shouldRehide) {
+        setTimeout(hideTildaHints, 100);
+      }
+      
+      if (shouldRebind) {
+        setTimeout(blockNativeTildaPromo, 100);
+      }
+      
+      // Always update cart wording when DOM changes
+      setTimeout(updateCartDiscountWording, 100);
+    });
+    
+    TildaPromo.mutationObserver.observe(document.body, {
+      childList: true,
+      subtree: true
+    });
+  }
+
+  /**
+   * Block native Tilda promo behavior
+   */
+  function blockNativeTildaPromo() {
+    // Find all potential apply buttons
+    const buttons = document.querySelectorAll('button, input[type="button"], input[type="submit"]');
+    
+    buttons.forEach(button => {
+      // Skip if already bound
+      if (TildaPromo.boundElements.has(button)) {
+        return;
+      }
+      
+      // Check if button is related to promo input
+      const isPromoButton = (
+        button === TildaPromo.applyButton ||
+        button.closest('.t-form') === TildaPromo.promoInput?.closest('.t-form') ||
+        button.textContent.toLowerCase().includes('apply') ||
+        button.textContent.toLowerCase().includes('применить')
+      );
+      
+      if (isPromoButton) {
+        // Add capture-phase listener to block native behavior
+        button.addEventListener('click', function(e) {
+          e.preventDefault();
+          e.stopPropagation();
+          e.stopImmediatePropagation();
+          handleApplyClick();
+        }, true);
+        
+        TildaPromo.boundElements.add(button);
+      }
+    });
+    
+    // Also block form submission if it contains promo input
+    if (TildaPromo.promoInput) {
+      const form = TildaPromo.promoInput.closest('form');
+      if (form && !TildaPromo.boundElements.has(form)) {
+        form.addEventListener('submit', function(e) {
+          // Only prevent if promo input has focus or was recently used
+          if (document.activeElement === TildaPromo.promoInput || TildaPromo.promoInput.value) {
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+            handleApplyClick();
+          }
+        }, true);
+        
+        TildaPromo.boundElements.add(form);
+      }
+    }
+    
+    // Block Enter key on promo input
+    if (TildaPromo.promoInput && !TildaPromo.boundElements.has(TildaPromo.promoInput)) {
+      TildaPromo.promoInput.addEventListener('keypress', function(e) {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          e.stopPropagation();
+          e.stopImmediatePropagation();
+          handleApplyClick();
+        }
+      }, true);
+      
+      TildaPromo.boundElements.add(TildaPromo.promoInput);
+    }
+  }
+
+  /**
+   * Update cart discount wording
+   */
+  function updateCartDiscountWording() {
+    // Only update if promo is applied
+    if (!TildaPromo.currentPromoCode) return;
+    
+    // Find discount text elements
+    const discountSelectors = [
+      '.t706__cartwin-discount',
+      '.t-cart__discount',
+      '.t706__cartwin-total-discount',
+      '.t-cart__total-discount'
+    ];
+    
+    let updated = false;
+    
+    discountSelectors.forEach(selector => {
+      document.querySelectorAll(selector).forEach(el => {
+        const text = el.textContent;
+        if (text && (text.includes('Ваша скидка: 100%') || text.includes('скидка: 100%'))) {
+          if (!text.includes('на один товар')) {
+            el.textContent = text.replace('100%', '100% на один товар');
+            updated = true;
+          }
+        }
+      });
+    });
+    
+    // If no existing discount text found, inject our own
+    if (!updated && TildaPromo.currentPromoCode) {
+      const cartTotal = document.querySelector('.t706__cartwin-total, .t-cart__total');
+      if (cartTotal) {
+        // Remove existing disclaimer
+        const existingDisclaimer = cartTotal.querySelector('.tilda-promo-disclaimer');
+        if (existingDisclaimer) {
+          existingDisclaimer.remove();
+        }
+        
+        // Add our disclaimer
+        const disclaimer = document.createElement('div');
+        disclaimer.className = 'tilda-promo-disclaimer';
+        disclaimer.textContent = 'Ваша скидка: 100% на один товар';
+        disclaimer.style.cssText = `
+          font-size: 12px;
+          color: #666;
+          margin-top: 4px;
+          font-style: italic;
+        `;
+        
+        cartTotal.appendChild(disclaimer);
+      }
+    }
+  }
+
   // Cleanup on page unload
   window.addEventListener('beforeunload', () => {
     if (TildaPromo.intervalId) {
       clearInterval(TildaPromo.intervalId);
       TildaPromo.intervalId = null;
+    }
+    
+    if (TildaPromo.mutationObserver) {
+      TildaPromo.mutationObserver.disconnect();
+      TildaPromo.mutationObserver = null;
     }
   });
 
