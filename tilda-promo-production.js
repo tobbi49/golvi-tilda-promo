@@ -1,5 +1,6 @@
-// === Tilda Promo Integration v1.0.5 ===
-const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbwFzq2_UU_omXvNHIxZA6m892mBWNQhWua2VDd-TV8aKxfrjL58p_F792GvMxqB0u-W5Q/exec';
+/*! Tilda Promo v1.0.7 | (c) 2025 | build: 2025-09-01 */
+// === Tilda Promo Integration v1.0.7 ===
+const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbw-s_uEWpZo9S5Y8KIb4Mnz1SHK5tslDe7-azk7yYtZ0HY2tT74WTkUgCHgrW-fqalmuA/exec';
 const MESSAGES = {
   applied: 'Promo code applied — 1 item free',
   invalid: 'Promo code is invalid or already used',
@@ -182,6 +183,10 @@ const MESSAGES = {
    * Setup event listeners
    */
   function setupEventListeners() {
+    // Guard against double-binding
+    if (TildaPromo.promoInput.__promoBound) return;
+    TildaPromo.promoInput.__promoBound = true;
+    
     // Input change - clear discount if code changed
     TildaPromo.promoInput.addEventListener('input', function() {
       const currentValue = this.value;
@@ -200,9 +205,17 @@ const MESSAGES = {
       }
     }, true);
     
-    // Scoped event interception
-    const promoScope = TildaPromo.promoInput.closest('form, .t-form__inputsbox, .t-input-group, .t706__cartwin');
+    // Safer promo scope selector with priority
+    const promoScope = TildaPromo.promoInput.closest('form.t-form') || 
+                      TildaPromo.promoInput.closest('.t706__cartwin') ||
+                      TildaPromo.promoInput.closest('.t-form__inputsbox') ||
+                      TildaPromo.promoInput.closest('.t-input-group') ||
+                      TildaPromo.promoInput.closest('form');
     if (promoScope) {
+      // Guard against double-binding on scope
+      if (promoScope.__promoCaptureBound) return;
+      promoScope.__promoCaptureBound = true;
+      
       // Capture-phase click listener for promo controls
       promoScope.addEventListener('click', function(e) {
         const isPromoControl = (
@@ -268,9 +281,11 @@ const MESSAGES = {
       if (result.ok && result.valid) {
         // Apply discount - store exact code as typed
         TildaPromo.currentPromoCode = rawCode;
-        applyPromoDiscount();
-        forceRedraw();
+        applyPromoDiscount(); // recalculateCartTotal() inside will trigger a redraw
         showMessage(MESSAGES.applied, 'success');
+        
+        // Close mobile keyboard
+        TildaPromo.promoInput.blur();
         
         // Update hidden input with exact raw code
         if (TildaPromo.hiddenInput) {
@@ -299,63 +314,62 @@ const MESSAGES = {
 
   /**
    * Verify directly with Apps Script
+   * Uses GET with query params - Google Apps Script's /exec frequently issues 302 redirects;
+   * some clients (and certain proxies) drop POST bodies on redirect. GET with query params
+   * is reliable across all environments and avoids this class of issues.
    */
   async function verifyDirect(code) {
     // Feature-detect AbortSignal.timeout (Safari fallback)
     let controller, signal;
     if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
-      signal = AbortSignal.timeout(10000);
+      signal = AbortSignal.timeout(15000);
     } else if (typeof AbortController !== 'undefined') {
       controller = new AbortController();
       signal = controller.signal;
-      setTimeout(() => { try { controller.abort(); } catch (_) {} }, 10000);
+      setTimeout(() => { try { controller.abort(); } catch (_) {} }, 15000);
     }
 
-    try {
-      const response = await fetch(SCRIPT_URL, {
-        method: 'POST',
+    const attemptFetch = async () => {
+      // Build query string with URLSearchParams
+      const params = new URLSearchParams({
+        action: 'verify',
+        code: code,
+        codeRaw: code,
+        ts: Date.now().toString()
+      });
+      
+      const response = await fetch(`${SCRIPT_URL}?${params}`, {
+        method: 'GET',
         headers: {
-          'Content-Type': 'text/plain;charset=utf-8'
+          'Accept': 'application/json'
         },
-        body: JSON.stringify({ action: 'verify', code: code, codeRaw: code }),
-        redirect: 'manual', // Critical: Don't follow 302 redirects automatically
         ...(signal ? { signal } : {})
       });
-
-      // Handle CORS error (status 0)
-      if (response.status === 0) {
-        console.error('[TildaPromo] CORS blocked');
-        throw new Error('CORS blocked');
-      }
-
-      // Handle Apps Script 302 redirect manually
-      if (response.status === 302) {
-        const location = response.headers.get('Location');
-        if (location) {
-          // Follow redirect with GET request only
-          const redirectResponse = await fetch(location, {
-            method: 'GET',
-            ...(signal ? { signal } : {})
-          });
-          
-          if (!redirectResponse.ok) {
-            throw new Error(`HTTP ${redirectResponse.status}: ${redirectResponse.statusText}`);
-          }
-          
-          const jsonResult = await redirectResponse.json();
-          return jsonResult;
-        }
-      }
 
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
 
-      const jsonResult = await response.json();
-      return jsonResult;
+      return await response.json();
+    };
+
+    try {
+      return await attemptFetch();
     } catch (error) {
-      console.error('[TildaPromo] Direct fetch error:', error);
-      throw error;
+      // Retry once on network-type errors (TypeError), not HTTP errors
+      if (error instanceof TypeError) {
+        console.warn('[TildaPromo] Network error, retrying once:', error.message);
+        try {
+          await new Promise(resolve => setTimeout(resolve, 400)); // 400ms delay
+          return await attemptFetch();
+        } catch (retryError) {
+          console.error('[TildaPromo] Retry failed:', retryError);
+          throw retryError;
+        }
+      } else {
+        console.error('[TildaPromo] Direct fetch error:', error);
+        throw error;
+      }
     }
   }
 
@@ -380,6 +394,7 @@ const MESSAGES = {
     }
 
     // Find cheapest item with hardened price parsing
+    // If multiple items share the same minimum price, choose the first one (lowest index) to keep behavior deterministic.
     let cheapestItem = null;
     let cheapestPrice = Infinity;
     let cheapestIndex = -1;
@@ -407,9 +422,8 @@ const MESSAGES = {
       product._originalPrice = toNumber(product.price);
       product._promoApplied = true; // Flag for UI updates
 
-      // Recalculate cart total and force UI update
+      // Recalculate cart total (this already triggers a redraw inside recalculateCartTotal)
       recalculateCartTotal();
-      forceRedraw();
     }
   }
 
@@ -433,7 +447,10 @@ const MESSAGES = {
       TildaPromo.hiddenInput.value = '';
     }
 
-    recalculateCartTotal();
+    // Remove all promo badges across the cart
+    document.querySelectorAll('.promo-free-badge').forEach(badge => badge.remove());
+
+    recalculateCartTotal(); // this already triggers forceRedraw()
     hideMessage();
   }
 
@@ -556,6 +573,9 @@ const MESSAGES = {
           window.tcart__reDrawCart();
         }
       }, 50);
+    } else {
+      // Fallback to redrawCart if tcart__reDrawCart is missing
+      redrawCart();
     }
     updateCartDiscountWording();
   }
@@ -743,48 +763,6 @@ const MESSAGES = {
     });
   }
 
-  /**
-   * Setup document-level capture listeners
-   */
-  function setupDocumentCapture() {
-    // Document-level click capture
-    document.addEventListener('click', function(e) {
-      if (!TildaPromo.promoContainer || !TildaPromo.promoContainer.contains(e.target)) {
-        return;
-      }
-      
-      // Check if target is a promo apply control
-      const isPromoControl = (
-        e.target === TildaPromo.applyButton ||
-        e.target.tagName === 'BUTTON' ||
-        (e.target.tagName === 'INPUT' && e.target.type === 'submit') ||
-        e.target.textContent?.toLowerCase().includes('apply') ||
-        e.target.textContent?.toLowerCase().includes('применить')
-      );
-      
-      if (isPromoControl) {
-        e.preventDefault();
-        e.stopPropagation();
-        e.stopImmediatePropagation();
-        handleApplyClick();
-      }
-    }, true);
-    
-    // Document-level submit capture
-    document.addEventListener('submit', function(e) {
-      if (!TildaPromo.promoContainer || !TildaPromo.promoContainer.contains(e.target)) {
-        return;
-      }
-      
-      // Block form submission if promo input has value
-      if (TildaPromo.promoInput && TildaPromo.promoInput.value) {
-        e.preventDefault();
-        e.stopPropagation();
-        e.stopImmediatePropagation();
-        handleApplyClick();
-      }
-    }, true);
-  }
 
   /**
    * Update cart discount wording
@@ -850,7 +828,7 @@ const MESSAGES = {
     getCartState: () => window.tcart,
     clearPromo: () => clearPromoDiscount(),
     forceRedraw: () => forceRedraw(),
-    version: 'v1.0.5'
+    version: 'v1.0.7'
   };
 
   // Cleanup on page unload
