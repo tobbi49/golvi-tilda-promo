@@ -1,5 +1,5 @@
-/*! Tilda Promo v1.0.7 | (c) 2025 | build: 2025-09-01 */
-// === Tilda Promo Integration v1.0.7 ===
+/*! Tilda Promo v1.1.0 | (c) 2025 | build: 2025-09-04 */
+// === Tilda Promo Integration v1.1.0 ===
 const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbw-s_uEWpZo9S5Y8KIb4Mnz1SHK5tslDe7-azk7yYtZ0HY2tT74WTkUgCHgrW-fqalmuA/exec';
 const MESSAGES = {
   applied: 'Promo code applied — 1 item free',
@@ -381,20 +381,55 @@ const MESSAGES = {
   }
 
   /**
-   * Apply promo discount - make exactly one unit of cheapest item free (quantity-safe)
+   * Internal cart reset helper - removes promo state cleanly (no UI side effects)
+   */
+  function resetCartPromoState() {
+    if (!window.tcart || !window.tcart.products) return;
+
+    // Iterate all cart lines in reverse order to safely remove clones
+    for (let i = window.tcart.products.length - 1; i >= 0; i--) {
+      const product = window.tcart.products[i];
+      
+      // If line is a promo clone → remove it
+      if (product._promoClone) {
+        window.tcart.products.splice(i, 1);
+        continue;
+      }
+      
+      // If line is promo-applied original → restore from stored originals
+      if (product._promoApplied) {
+        if (product._originalPrice !== undefined) {
+          product.price = product._originalPrice;
+        }
+        if (product._originalAmount !== undefined) {
+          product.amount = product._originalAmount;
+        }
+        if (product._originalQty !== undefined) {
+          product.quantity = product._originalQty;
+        }
+      }
+      
+      // Clear all internal promo flags/original snapshots
+      delete product._promoApplied;
+      delete product._promoClone;
+      delete product._originalPrice;
+      delete product._originalAmount;
+      delete product._originalQty;
+    }
+  }
+
+  /**
+   * Apply promo discount - mutate cart lines so one physical unit becomes free
    */
   function applyPromoDiscount() {
     if (!window.tcart || !window.tcart.products || !window.tcart.products.length) {
       return;
     }
 
-    // Store original data if not already stored
-    if (!TildaPromo.originalCartData) {
-      TildaPromo.originalCartData = JSON.parse(JSON.stringify(window.tcart.products));
-    }
+    // Reset any previous promo state before applying
+    resetCartPromoState();
 
-    // Find cheapest item with hardened price parsing
-    // If multiple items share the same minimum price, choose the first one (lowest index) to keep behavior deterministic.
+    // Find cheapest cart line where price > 0
     let cheapestItem = null;
     let cheapestPrice = Infinity;
     let cheapestIndex = -1;
@@ -408,23 +443,55 @@ const MESSAGES = {
       }
     });
 
-    if (cheapestItem && cheapestIndex >= 0) {
-      // Clear any existing promo discounts
-      window.tcart.products.forEach(product => {
-        delete product._promoDiscount;
-        delete product._originalPrice;
-        delete product._promoApplied;
-      });
-
-      // Mark the cheapest item for discount (but don't change its price)
-      const product = window.tcart.products[cheapestIndex];
-      product._promoDiscount = toNumber(product.price); // Store discount amount for one unit
-      product._originalPrice = toNumber(product.price);
-      product._promoApplied = true; // Flag for UI updates
-
-      // Recalculate cart total (this already triggers a redraw inside recalculateCartTotal)
+    // If no positive-priced item found, consider promo applied (edge case)
+    if (!cheapestItem || cheapestIndex < 0) {
       recalculateCartTotal();
+      return;
     }
+
+    const targetLine = window.tcart.products[cheapestIndex];
+    const quantity = Math.max(1, Math.floor(toNumber(targetLine.quantity)));
+    
+    // Store original values before modification
+    targetLine._originalPrice = toNumber(targetLine.price);
+    if (targetLine.amount !== undefined) {
+      targetLine._originalAmount = toNumber(targetLine.amount);
+    }
+    targetLine._originalQty = quantity;
+
+    if (quantity === 1) {
+      // If quantity = 1 → set that line's unit price to 0
+      targetLine.price = 0;
+      if (targetLine.amount !== undefined) {
+        targetLine.amount = 0;
+      }
+      targetLine._promoApplied = true;
+    } else {
+      // If quantity > 1 → split the line
+      // Decrease original line's quantity by 1
+      targetLine.quantity = quantity - 1;
+      targetLine._promoApplied = true;
+      
+      // Create clone for the free unit
+      const cloneLine = JSON.parse(JSON.stringify(targetLine));
+      cloneLine.quantity = 1;
+      cloneLine.price = 0;
+      if (cloneLine.amount !== undefined) {
+        cloneLine.amount = 0;
+      }
+      cloneLine._promoApplied = true;
+      cloneLine._promoClone = true;
+      
+      // Generate unique uid for clone if needed
+      if (cloneLine.uid) {
+        cloneLine.uid = cloneLine.uid + '_promo_free';
+      }
+      
+      // Insert clone right after the original line
+      window.tcart.products.splice(cheapestIndex + 1, 0, cloneLine);
+    }
+
+    recalculateCartTotal();
   }
 
   /**
@@ -433,16 +500,11 @@ const MESSAGES = {
   function clearPromoDiscount() {
     if (!window.tcart || !window.tcart.products) return;
 
-    TildaPromo.currentPromoCode = null;
+    // Call the internal cart reset helper
+    resetCartPromoState();
     
-    // Clear promo flags (but don't restore prices since we never changed them)
-    window.tcart.products.forEach(product => {
-      delete product._promoDiscount;
-      delete product._originalPrice;
-      delete product._promoApplied;
-    });
-
-    // Clear hidden input
+    // Reset current promo code and hidden input
+    TildaPromo.currentPromoCode = null;
     if (TildaPromo.hiddenInput) {
       TildaPromo.hiddenInput.value = '';
     }
@@ -450,38 +512,31 @@ const MESSAGES = {
     // Remove all promo badges across the cart
     document.querySelectorAll('.promo-free-badge').forEach(badge => badge.remove());
 
-    recalculateCartTotal(); // this already triggers forceRedraw()
+    // Recalculate totals and hide messages
+    recalculateCartTotal();
     hideMessage();
   }
 
   /**
-   * Recalculate cart total with quantity-safe promo discount
+   * Recalculate cart total - simplified to sum line prices * quantity
    */
   function recalculateCartTotal() {
     if (!window.tcart || !window.tcart.products) return;
 
     let total = 0;
-    let promoDiscount = 0;
 
-    // Calculate normal total with hardened parsing
+    // Sum each line's price * quantity (using normalized number parser)
     window.tcart.products.forEach(product => {
       const price = toNumber(product.price);
       const quantity = Math.max(1, Math.floor(toNumber(product.quantity)));
       total += price * quantity;
-      
-      // If this product has promo applied, subtract exactly one unit's price
-      if (product._promoApplied && product._promoDiscount) {
-        promoDiscount = toNumber(product._promoDiscount);
-      }
     });
 
-    // Apply promo discount (subtract exactly one unit of cheapest item)
-    total = Math.max(0, total - promoDiscount);
-
+    // Set total and keep promocode for traceability
     window.tcart.total = total;
     window.tcart.totalprice = total;
     window.tcart.promocode = TildaPromo.currentPromoCode || '';
-    window.tcart.promocode_discount = promoDiscount || 0;
+    window.tcart.promocode_discount = 0; // No separate discount accumulator
     
     forceRedraw();
   }
@@ -507,7 +562,7 @@ const MESSAGES = {
   }
 
   /**
-   * Manual cart UI update (fallback) with quantity-safe promo indicators
+   * Manual cart UI update (fallback) - badge rules: only show on zero-price lines
    */
   function updateCartUI() {
     // Update total display
@@ -530,8 +585,9 @@ const MESSAGES = {
           existingBadge.remove();
         }
         
-        // Add "1 item free" badge if this product has promo applied
-        if (product._promoApplied) {
+        // Only show "1 item free" badge on lines that are actually promo-applied AND have zero price
+        const price = toNumber(product.price);
+        if (product._promoApplied && price === 0) {
           const badge = document.createElement('span');
           badge.className = 'promo-free-badge';
           badge.textContent = '1 item free';
@@ -636,12 +692,13 @@ const MESSAGES = {
   }
 
   /**
-   * Reapply promo discount if active
+   * Reapply promo discount if active - safer re-apply
    */
   function reapplyPromoIfActive() {
     if (TildaPromo.currentPromoCode && window.tcart && window.tcart.products && window.tcart.products.length > 0) {
-      // Clear current discount and reapply
-      TildaPromo.originalCartData = null; // Reset original data
+      // Run internal reset helper, then apply logic again
+      // This guarantees "exactly 1 unit free" and correct target when cart composition changes
+      resetCartPromoState();
       applyPromoDiscount();
     }
   }
@@ -828,7 +885,7 @@ const MESSAGES = {
     getCartState: () => window.tcart,
     clearPromo: () => clearPromoDiscount(),
     forceRedraw: () => forceRedraw(),
-    version: 'v1.0.7'
+    version: 'v1.1.0'
   };
 
   // Cleanup on page unload
