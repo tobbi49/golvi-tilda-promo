@@ -112,12 +112,20 @@ const MESSAGES = {
   function findOrCreateApplyButton() {
     // Look for existing button near the input
     const parent = TildaPromo.promoInput.parentElement;
-    let button = parent.querySelector('button, input[type="button"], input[type="submit"]');
+    
+    // First check if we already created a promo apply button
+    let button = parent.querySelector('.tilda-promo-apply');
+    
+    if (!button) {
+      // Look for any existing button
+      button = parent.querySelector('button, input[type="button"], input[type="submit"]');
+    }
     
     if (!button) {
       // Create our own apply button
       button = document.createElement('button');
       button.type = 'button';
+      button.className = 'tilda-promo-apply';
       button.textContent = 'Apply';
       button.style.cssText = `
         margin-left: 8px;
@@ -132,6 +140,9 @@ const MESSAGES = {
       
       // Insert after the input
       TildaPromo.promoInput.parentNode.insertBefore(button, TildaPromo.promoInput.nextSibling);
+    } else if (!button.classList.contains('tilda-promo-apply')) {
+      // Mark existing button as our promo button
+      button.classList.add('tilda-promo-apply');
     }
 
     return button;
@@ -381,6 +392,32 @@ const MESSAGES = {
   }
 
   /**
+   * Sync line amounts - ensure each product.amount matches price * quantity
+   */
+  function syncLineAmounts() {
+    if (!window.tcart || !window.tcart.products) return;
+    
+    window.tcart.products.forEach(product => {
+      const price = toNumber(product.price);
+      const quantity = Math.max(1, Math.floor(toNumber(product.quantity)));
+      product.amount = price * quantity;
+    });
+  }
+
+  /**
+   * Sync cart totals - recalculate and set all total fields
+   */
+  function syncCartTotals() {
+    if (!window.tcart || !window.tcart.products) return;
+    
+    const sum = window.tcart.products.reduce((s, p) => s + toNumber(p.amount), 0);
+    window.tcart.total = sum;
+    window.tcart.totalprice = sum;
+    window.tcart.amount = sum;
+    window.tcart.prodamount = sum;
+  }
+
+  /**
    * Internal cart reset helper - removes promo state cleanly (no UI side effects)
    */
   function resetCartPromoState() {
@@ -416,6 +453,9 @@ const MESSAGES = {
       delete product._originalAmount;
       delete product._originalQty;
     }
+    
+    // Sync line amounts after restoring originals
+    syncLineAmounts();
   }
 
   /**
@@ -523,20 +563,13 @@ const MESSAGES = {
   function recalculateCartTotal() {
     if (!window.tcart || !window.tcart.products) return;
 
-    let total = 0;
-
-    // Sum each line's price * quantity (using normalized number parser)
-    window.tcart.products.forEach(product => {
-      const price = toNumber(product.price);
-      const quantity = Math.max(1, Math.floor(toNumber(product.quantity)));
-      total += price * quantity;
-    });
-
-    // Set total and keep promocode for traceability
-    window.tcart.total = total;
-    window.tcart.totalprice = total;
+    // Set promocode for traceability
     window.tcart.promocode = TildaPromo.currentPromoCode || '';
     window.tcart.promocode_discount = 0; // No separate discount accumulator
+    
+    // Sync line amounts and cart totals
+    syncLineAmounts();
+    syncCartTotals();
     
     forceRedraw();
   }
@@ -566,7 +599,7 @@ const MESSAGES = {
    */
   function updateCartUI() {
     // Update total display
-    const totalElements = document.querySelectorAll('.t706__cartwin-total-price, .t-cart__total-price');
+    const totalElements = document.querySelectorAll('.t706__cartwin-total-price, .t-cart__total-price, .st100__total-price');
     totalElements.forEach(el => {
       if (window.tcart && window.tcart.total !== undefined) {
         el.textContent = window.tcart.total.toFixed(2);
@@ -574,7 +607,7 @@ const MESSAGES = {
     });
 
     // Update individual item displays and add promo indicators
-    const itemElements = document.querySelectorAll('.t706__cartwin-item, .t-cart__item');
+    const itemElements = document.querySelectorAll('.t706__cartwin-item, .t-cart__item, .st100__cartitem');
     itemElements.forEach((itemEl, index) => {
       if (window.tcart.products[index]) {
         const product = window.tcart.products[index];
@@ -602,8 +635,8 @@ const MESSAGES = {
           `;
           
           // Try to append to the item name or price area
-          const nameEl = itemEl.querySelector('.t706__cartwin-item-title, .t-cart__item-title');
-          const priceEl = itemEl.querySelector('.t706__cartwin-item-price, .t-cart__item-price');
+          const nameEl = itemEl.querySelector('.t706__cartwin-item-title, .t-cart__item-title, .st100__title');
+          const priceEl = itemEl.querySelector('.t706__cartwin-item-price, .t-cart__item-price, .st100__price');
           
           if (nameEl) {
             nameEl.appendChild(badge);
@@ -622,6 +655,16 @@ const MESSAGES = {
    * Force cart redraw
    */
   function forceRedraw() {
+    // Call Tilda internal recalc functions if they exist
+    if (typeof window.tcart__recalcProductsPrice === 'function') {
+      window.tcart__recalcProductsPrice();
+    }
+    if (typeof window.tcart__recalcTotal === 'function') {
+      window.tcart__recalcTotal();
+    } else if (typeof window.tcart__updateTotal === 'function') {
+      window.tcart__updateTotal();
+    }
+    
     if (typeof window.tcart__reDrawCart === 'function') {
       window.tcart__reDrawCart();
       setTimeout(() => {
@@ -634,6 +677,10 @@ const MESSAGES = {
       redrawCart();
     }
     updateCartDiscountWording();
+    
+    // Fire events for ST100 compatibility
+    document.dispatchEvent(new Event('tcart_change'));
+    document.dispatchEvent(new Event('tcart_update'));
   }
 
   /**
@@ -696,9 +743,7 @@ const MESSAGES = {
    */
   function reapplyPromoIfActive() {
     if (TildaPromo.currentPromoCode && window.tcart && window.tcart.products && window.tcart.products.length > 0) {
-      // Run internal reset helper, then apply logic again
-      // This guarantees "exactly 1 unit free" and correct target when cart composition changes
-      resetCartPromoState();
+      // applyPromoDiscount() already calls resetCartPromoState() which calls syncLineAmounts()
       applyPromoDiscount();
     }
   }
