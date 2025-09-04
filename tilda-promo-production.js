@@ -1,5 +1,5 @@
-/*! Tilda Promo v1.1.0 | (c) 2025 | build: 2025-09-04 */
-// === Tilda Promo Integration v1.1.0 ===
+/*! Tilda Promo v1.1.2 | (c) 2025 | build: 2025-09-04 */
+// === Tilda Promo Integration v1.1.2 ===
 const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbw-s_uEWpZo9S5Y8KIb4Mnz1SHK5tslDe7-azk7yYtZ0HY2tT74WTkUgCHgrW-fqalmuA/exec';
 const MESSAGES = {
   applied: 'Promo code applied — 1 item free',
@@ -110,40 +110,31 @@ const MESSAGES = {
    * Find existing apply button or create new one
    */
   function findOrCreateApplyButton() {
-    // Look for existing button near the input
-    const parent = TildaPromo.promoInput.parentElement;
+    // Remove any stale promo apply buttons in the same container only
+    const parent = TildaPromo.promoInput.parentElement || document;
+    parent.querySelectorAll('.tilda-promo-apply').forEach(btn => btn.remove());
     
-    // First check if we already created a promo apply button
-    let button = parent.querySelector('.tilda-promo-apply');
+    // Always create a fresh button next to the promo input
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'tilda-promo-apply';
+    button.textContent = 'Apply';
+    button.style.cssText = `
+      margin-left: 8px;
+      padding: 6px 12px;
+      background: #000;
+      color: #fff;
+      border: none;
+      border-radius: 3px;
+      cursor: pointer;
+      font-size: 12px;
+    `;
     
-    if (!button) {
-      // Look for any existing button
-      button = parent.querySelector('button, input[type="button"], input[type="submit"]');
-    }
+    // Insert after the input using insertAdjacentElement
+    TildaPromo.promoInput.insertAdjacentElement('afterend', button);
     
-    if (!button) {
-      // Create our own apply button
-      button = document.createElement('button');
-      button.type = 'button';
-      button.className = 'tilda-promo-apply';
-      button.textContent = 'Apply';
-      button.style.cssText = `
-        margin-left: 8px;
-        padding: 6px 12px;
-        background: #000;
-        color: #fff;
-        border: none;
-        border-radius: 3px;
-        cursor: pointer;
-        font-size: 12px;
-      `;
-      
-      // Insert after the input
-      TildaPromo.promoInput.parentNode.insertBefore(button, TildaPromo.promoInput.nextSibling);
-    } else if (!button.classList.contains('tilda-promo-apply')) {
-      // Mark existing button as our promo button
-      button.classList.add('tilda-promo-apply');
-    }
+    // Bind click handler directly with guard against double-binding
+    button.addEventListener('click', handleApplyClick, { once: false });
 
     return button;
   }
@@ -852,7 +843,10 @@ const MESSAGES = {
       });
       
       if (shouldRebind) {
-        setTimeout(setupEventListeners, 100);
+        setTimeout(() => {
+          findPromoElements();
+          setupEventListeners();
+        }, 100);
       }
       
       // Always update cart wording when DOM changes
@@ -930,7 +924,7 @@ const MESSAGES = {
     getCartState: () => window.tcart,
     clearPromo: () => clearPromoDiscount(),
     forceRedraw: () => forceRedraw(),
-    version: 'v1.1.0'
+    version: 'v1.1.2'
   };
 
   // Cleanup on page unload
