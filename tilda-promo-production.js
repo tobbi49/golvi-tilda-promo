@@ -1,5 +1,5 @@
-/*! Tilda Promo v1.1.3 | (c) 2025 | build: 2025-09-05 */
-// === Tilda Promo Integration v1.1.3 ===
+/*! Tilda Promo v1.1.4 | (c) 2025 | build: 2025-09-05 */
+// === Tilda Promo Integration v1.1.4 ===
 const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbw-s_uEWpZo9S5Y8KIb4Mnz1SHK5tslDe7-azk7yYtZ0HY2tT74WTkUgCHgrW-fqalmuA/exec';
 const MESSAGES = {
   applied: 'Promo code applied — 1 item free',
@@ -23,13 +23,12 @@ const MESSAGES = {
     intervalId: null,
     mutationObserver: null,
     boundElements: new Set(),
-    promoContainer: null
+    promoContainer: null,
+    isRefreshing: false
   };
 
-  // Clear session flag on page load to start fresh
-  if (typeof sessionStorage !== 'undefined') {
-    sessionStorage.removeItem('tilda_promo_reloaded');
-  }
+  // Initialize guard flags
+  TildaPromo.isRefreshing = false;
 
   /**
    * Initialize the promo code system
@@ -286,7 +285,7 @@ const MESSAGES = {
       if (result.ok && result.valid) {
         // Apply discount - store exact code as typed
         TildaPromo.currentPromoCode = rawCode;
-        applyPromoDiscount(); // recalculateCartTotal() inside will trigger a redraw
+        applyPromoDiscount(); // This applies the discount logic
         showMessage(MESSAGES.applied, 'success');
         
         // Close mobile keyboard
@@ -297,13 +296,8 @@ const MESSAGES = {
           TildaPromo.hiddenInput.value = rawCode;
         }
         
-        // One-time auto-reload after success to ensure clean Tilda/ST100 state
-        if (typeof sessionStorage !== 'undefined' && !sessionStorage.getItem('tilda_promo_reloaded')) {
-          sessionStorage.setItem('tilda_promo_reloaded', '1');
-          setTimeout(() => {
-            window.location.reload();
-          }, 500);
-        }
+        // City-like refresh: synchronize and redraw without page reload
+        performCityLikeRefresh();
         
       } else {
         clearPromoDiscount();
@@ -580,11 +574,14 @@ const MESSAGES = {
     window.tcart.promocode = TildaPromo.currentPromoCode || '';
     window.tcart.promocode_discount = 0; // No separate discount accumulator
     
-    // Sync line amounts and cart totals before redraw
+    // Sync line amounts and cart totals
     syncLineAmounts();
     syncCartTotals();
     
-    forceRedraw();
+    // Only force redraw if not in the middle of a city-like refresh
+    if (!TildaPromo.isRefreshing) {
+      forceRedraw();
+    }
   }
 
   /**
@@ -694,6 +691,65 @@ const MESSAGES = {
     // Fire events for ST100 compatibility
     document.dispatchEvent(new Event('tcart_change'));
     document.dispatchEvent(new Event('tcart_update'));
+  }
+
+  /**
+   * Perform city-like refresh: synchronize totals and trigger Tilda internals
+   * This mimics the exact sequence that fires when a user selects a delivery city
+   */
+  function performCityLikeRefresh() {
+    // Guard against infinite loops
+    if (TildaPromo.isRefreshing) {
+      return;
+    }
+    
+    TildaPromo.isRefreshing = true;
+    
+    try {
+      // Step 1: Synchronize totals before repaint - ensure UI reflects free item immediately
+      syncLineAmounts();
+      syncCartTotals();
+      
+      // Step 2: Call Tilda internal functions in the same order as city selection
+      if (typeof window.tcart__recalcProductsPrice === 'function') {
+        window.tcart__recalcProductsPrice();
+      }
+      
+      if (typeof window.tcart__recalcTotal === 'function') {
+        window.tcart__recalcTotal();
+      } else if (typeof window.tcart__updateTotal === 'function') {
+        window.tcart__updateTotal();
+      }
+      
+      // Step 3: Force cart redraw - this refreshes prices and UI in-place without closing modal
+      if (typeof window.tcart__reDrawCart === 'function') {
+        window.tcart__reDrawCart();
+        // Single redraw is usually sufficient, but keep one delayed redraw for stability
+        setTimeout(() => {
+          if (typeof window.tcart__reDrawCart === 'function' && !TildaPromo.isRefreshing) {
+            window.tcart__reDrawCart();
+          }
+        }, 100);
+      } else {
+        // Fallback to manual UI update
+        updateCartUI();
+      }
+      
+      // Step 4: Update discount wording after redraw
+      setTimeout(() => {
+        updateCartDiscountWording();
+      }, 50);
+      
+      // Step 5: Dispatch events for ST100 compatibility - same as city selection
+      document.dispatchEvent(new Event('tcart_change'));
+      document.dispatchEvent(new Event('tcart_update'));
+      
+    } finally {
+      // Clear guard flag after operations complete
+      setTimeout(() => {
+        TildaPromo.isRefreshing = false;
+      }, 150);
+    }
   }
 
   /**
@@ -945,7 +1001,7 @@ const MESSAGES = {
     getCartState: () => window.tcart,
     clearPromo: () => clearPromoDiscount(),
     forceRedraw: () => forceRedraw(),
-    version: 'v1.1.3'
+    version: 'v1.1.4'
   };
 
   // Cleanup on page unload
