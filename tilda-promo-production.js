@@ -1,5 +1,5 @@
-/*! Tilda Promo v1.1.4 | (c) 2025 | build: 2025-09-05 */
-// === Tilda Promo Integration v1.1.4 ===
+/*! Tilda Promo v1.1.5 | (c) 2025 | build: 2025-09-05 */
+// === Tilda Promo Integration v1.1.5 ===
 const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbw-s_uEWpZo9S5Y8KIb4Mnz1SHK5tslDe7-azk7yYtZ0HY2tT74WTkUgCHgrW-fqalmuA/exec';
 const MESSAGES = {
   applied: 'Promo code applied — 1 item free',
@@ -24,7 +24,8 @@ const MESSAGES = {
     mutationObserver: null,
     boundElements: new Set(),
     promoContainer: null,
-    isRefreshing: false
+    isRefreshing: false,
+    isDeliveryRecalcing: false
   };
 
   // Initialize guard flags
@@ -122,6 +123,7 @@ const MESSAGES = {
       // Create our own apply button
       button = document.createElement('button');
       button.type = 'button';
+      button.className = 'tilda-promo-apply';
       button.textContent = 'Apply';
       button.style.cssText = `
         margin-left: 8px;
@@ -222,27 +224,29 @@ const MESSAGES = {
       
       // Capture-phase click listener for promo controls
       promoScope.addEventListener('click', function(e) {
-        const isPromoControl = (
-          e.target === TildaPromo.applyButton ||
-          (e.target.tagName === 'BUTTON' && e.target.type === 'submit')
-        );
+        // Only act when it's our promo button OR when promo input has value
+        const isPromoButton = e.target === TildaPromo.applyButton;
+        const hasPromoValue = TildaPromo.promoInput && TildaPromo.promoInput.value.trim();
         
-        if (isPromoControl) {
+        if (isPromoButton || (hasPromoValue && e.target.tagName === 'BUTTON' && e.target.type === 'submit')) {
           e.preventDefault();
           e.stopPropagation();
           e.stopImmediatePropagation();
           handleApplyClick();
         }
+        // Otherwise, let the event bubble normally (don't preventDefault)
       }, true);
       
       // Capture-phase submit listener
       promoScope.addEventListener('submit', function(e) {
-        if (TildaPromo.promoInput && TildaPromo.promoInput.value) {
+        // Only intercept submit if promo input has a non-empty value
+        if (TildaPromo.promoInput && TildaPromo.promoInput.value.trim()) {
           e.preventDefault();
           e.stopPropagation();
           e.stopImmediatePropagation();
           handleApplyClick();
         }
+        // Otherwise, let normal form submission proceed
       }, true);
     }
 
@@ -288,6 +292,9 @@ const MESSAGES = {
         applyPromoDiscount(); // This applies the discount logic
         showMessage(MESSAGES.applied, 'success');
         
+        // Trigger delivery recalculation to update cart properly
+        triggerDeliveryRecalc();
+        
         // Close mobile keyboard
         TildaPromo.promoInput.blur();
         
@@ -295,9 +302,6 @@ const MESSAGES = {
         if (TildaPromo.hiddenInput) {
           TildaPromo.hiddenInput.value = rawCode;
         }
-        
-        // City-like refresh: synchronize and redraw without page reload
-        performCityLikeRefresh();
         
       } else {
         clearPromoDiscount();
@@ -729,7 +733,7 @@ const MESSAGES = {
           if (typeof window.tcart__reDrawCart === 'function' && !TildaPromo.isRefreshing) {
             window.tcart__reDrawCart();
           }
-        }, 100);
+        }, 180);
       } else {
         // Fallback to manual UI update
         updateCartUI();
@@ -749,6 +753,41 @@ const MESSAGES = {
       setTimeout(() => {
         TildaPromo.isRefreshing = false;
       }, 150);
+    }
+  }
+
+  /**
+   * Trigger delivery recalculation using Tilda's native delivery update functions
+   */
+  function triggerDeliveryRecalc() {
+    // Guard against infinite loops
+    if (TildaPromo.isDeliveryRecalcing) {
+      return;
+    }
+    
+    TildaPromo.isDeliveryRecalcing = true;
+    
+    try {
+      // Preferred: newer carts with tcart__updateDelivery
+      if (typeof window.tcart__updateDelivery === 'function') {
+        window.tcart__updateDelivery(window.tcart);
+        return;
+      }
+      
+      // Fallback: older carts with tcart__updateDeliveryPrice
+      if (typeof window.tcart__updateDeliveryPrice === 'function') {
+        window.tcart__updateDeliveryPrice(window.tcart);
+        return;
+      }
+      
+      // Last resort: use our city-like refresh imitation
+      performCityLikeRefresh();
+      
+    } finally {
+      // Clear guard flag after delivery recalc completes
+      setTimeout(() => {
+        TildaPromo.isDeliveryRecalcing = false;
+      }, 200);
     }
   }
 
@@ -811,6 +850,11 @@ const MESSAGES = {
    * Reapply promo discount if active - safer re-apply
    */
   function reapplyPromoIfActive() {
+    // Guard against recursive loops during delivery recalculation
+    if (TildaPromo.isDeliveryRecalcing || TildaPromo.isRefreshing) {
+      return;
+    }
+    
     if (TildaPromo.currentPromoCode && window.tcart && window.tcart.products && window.tcart.products.length > 0) {
       // Run internal reset helper, then apply logic again
       // This guarantees "exactly 1 unit free" and correct target when cart composition changes
@@ -923,7 +967,10 @@ const MESSAGES = {
       });
       
       if (shouldRebind) {
-        setTimeout(setupEventListeners, 100);
+        setTimeout(() => {
+          findPromoElements();
+          setupEventListeners();
+        }, 100);
       }
       
       // Always update cart wording when DOM changes
@@ -1001,7 +1048,7 @@ const MESSAGES = {
     getCartState: () => window.tcart,
     clearPromo: () => clearPromoDiscount(),
     forceRedraw: () => forceRedraw(),
-    version: 'v1.1.4'
+    version: 'v1.1.5'
   };
 
   // Cleanup on page unload
