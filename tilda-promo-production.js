@@ -1,5 +1,5 @@
-/*! Tilda Promo v1.1.2 | (c) 2025 | build: 2025-09-04 */
-// === Tilda Promo Integration v1.1.2 ===
+/*! Tilda Promo v1.1.3 | (c) 2025 | build: 2025-09-05 */
+// === Tilda Promo Integration v1.1.3 ===
 const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbw-s_uEWpZo9S5Y8KIb4Mnz1SHK5tslDe7-azk7yYtZ0HY2tT74WTkUgCHgrW-fqalmuA/exec';
 const MESSAGES = {
   applied: 'Promo code applied — 1 item free',
@@ -25,6 +25,11 @@ const MESSAGES = {
     boundElements: new Set(),
     promoContainer: null
   };
+
+  // Clear session flag on page load to start fresh
+  if (typeof sessionStorage !== 'undefined') {
+    sessionStorage.removeItem('tilda_promo_reloaded');
+  }
 
   /**
    * Initialize the promo code system
@@ -110,31 +115,29 @@ const MESSAGES = {
    * Find existing apply button or create new one
    */
   function findOrCreateApplyButton() {
-    // Remove any stale promo apply buttons in the same container only
-    const parent = TildaPromo.promoInput.parentElement || document;
-    parent.querySelectorAll('.tilda-promo-apply').forEach(btn => btn.remove());
+    // Look for existing button near the input
+    const parent = TildaPromo.promoInput.parentElement;
+    let button = parent.querySelector('button, input[type="button"], input[type="submit"]');
     
-    // Always create a fresh button next to the promo input
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'tilda-promo-apply';
-    button.textContent = 'Apply';
-    button.style.cssText = `
-      margin-left: 8px;
-      padding: 6px 12px;
-      background: #000;
-      color: #fff;
-      border: none;
-      border-radius: 3px;
-      cursor: pointer;
-      font-size: 12px;
-    `;
-    
-    // Insert after the input using insertAdjacentElement
-    TildaPromo.promoInput.insertAdjacentElement('afterend', button);
-    
-    // Bind click handler directly with guard against double-binding
-    button.addEventListener('click', handleApplyClick, { once: false });
+    if (!button) {
+      // Create our own apply button
+      button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = 'Apply';
+      button.style.cssText = `
+        margin-left: 8px;
+        padding: 6px 12px;
+        background: #000;
+        color: #fff;
+        border: none;
+        border-radius: 3px;
+        cursor: pointer;
+        font-size: 12px;
+      `;
+      
+      // Insert after the input
+      TildaPromo.promoInput.parentNode.insertBefore(button, TildaPromo.promoInput.nextSibling);
+    }
 
     return button;
   }
@@ -294,6 +297,14 @@ const MESSAGES = {
           TildaPromo.hiddenInput.value = rawCode;
         }
         
+        // One-time auto-reload after success to ensure clean Tilda/ST100 state
+        if (typeof sessionStorage !== 'undefined' && !sessionStorage.getItem('tilda_promo_reloaded')) {
+          sessionStorage.setItem('tilda_promo_reloaded', '1');
+          setTimeout(() => {
+            window.location.reload();
+          }, 500);
+        }
+        
       } else {
         clearPromoDiscount();
         showMessage(MESSAGES.invalid, 'error');
@@ -383,7 +394,7 @@ const MESSAGES = {
   }
 
   /**
-   * Sync line amounts - ensure each product.amount matches price * quantity
+   * Sync line amounts - ensure each product.amount matches price × quantity
    */
   function syncLineAmounts() {
     if (!window.tcart || !window.tcart.products) return;
@@ -522,6 +533,8 @@ const MESSAGES = {
       window.tcart.products.splice(cheapestIndex + 1, 0, cloneLine);
     }
 
+    // Sync line amounts after changing any line
+    syncLineAmounts();
     recalculateCartTotal();
   }
 
@@ -554,11 +567,20 @@ const MESSAGES = {
   function recalculateCartTotal() {
     if (!window.tcart || !window.tcart.products) return;
 
+    let total = 0;
+
+    // Sum each line's price * quantity (using normalized number parser)
+    window.tcart.products.forEach(product => {
+      const price = toNumber(product.price);
+      const quantity = Math.max(1, Math.floor(toNumber(product.quantity)));
+      total += price * quantity;
+    });
+
     // Set promocode for traceability
     window.tcart.promocode = TildaPromo.currentPromoCode || '';
     window.tcart.promocode_discount = 0; // No separate discount accumulator
     
-    // Sync line amounts and cart totals
+    // Sync line amounts and cart totals before redraw
     syncLineAmounts();
     syncCartTotals();
     
@@ -734,7 +756,9 @@ const MESSAGES = {
    */
   function reapplyPromoIfActive() {
     if (TildaPromo.currentPromoCode && window.tcart && window.tcart.products && window.tcart.products.length > 0) {
-      // applyPromoDiscount() already calls resetCartPromoState() which calls syncLineAmounts()
+      // Run internal reset helper, then apply logic again
+      // This guarantees "exactly 1 unit free" and correct target when cart composition changes
+      resetCartPromoState();
       applyPromoDiscount();
     }
   }
@@ -843,10 +867,7 @@ const MESSAGES = {
       });
       
       if (shouldRebind) {
-        setTimeout(() => {
-          findPromoElements();
-          setupEventListeners();
-        }, 100);
+        setTimeout(setupEventListeners, 100);
       }
       
       // Always update cart wording when DOM changes
@@ -924,7 +945,7 @@ const MESSAGES = {
     getCartState: () => window.tcart,
     clearPromo: () => clearPromoDiscount(),
     forceRedraw: () => forceRedraw(),
-    version: 'v1.1.2'
+    version: 'v1.1.3'
   };
 
   // Cleanup on page unload
@@ -939,3 +960,5 @@ const MESSAGES = {
   });
 
 })();
+
+
